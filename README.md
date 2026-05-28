@@ -18,7 +18,7 @@ The repository includes:
 * Benchmark survival methods
 * Time-dependent AUC and Integrated Brier Score evaluation
 * ELBO convergence diagnostics
-* Publication-quality figures and LaTeX tables
+
 
 ---
 
@@ -81,7 +81,7 @@ The proposed variational inference procedures provide efficient posterior approx
 ## 1. Clone the Repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/AGP-VI-and-Gaussian-IGH-VI.git
+git clone https://github.com/Dydx1989/AGP-VI-and-Gaussian-IGH-VI.git
 cd AGP-VI-and-Gaussian-IGH-VI
 ```
 
