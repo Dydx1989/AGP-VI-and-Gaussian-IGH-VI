@@ -50,13 +50,14 @@ The following methods are implemented and compared throughout the paper:
 │   ├── 07_summary_latex.R
 │   └── 08_plots.R
 │
+├──run_simulation_four_methods
+├──results/
+├── figures/
+├── 10_real_data_analysis_six_datasets.R
+├── chop.csv
 ├── results/
 ├── figures/
-├── DBCD_Data.csv
-├── chop.csv
-├── 10_real_data_analysis_six_datasets.R
-├── README.md
-└── README_six_real_data_analysis.md
+
 ```
 
 ---
