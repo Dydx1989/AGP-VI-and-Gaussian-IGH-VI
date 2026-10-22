@@ -318,11 +318,48 @@ BiocManager::install(c(
 
 # Citation
 
-If you use this repository, please cite:
+If you use this code, please cite the paper and the software.
+
+**Paper:**
 
 ```text
-Author(s). A Robust Hierarchical Bayesian Cox Model with
+Doroh, B.I.; Dauda, K.A. A Hierarchical Bayesian Cox Model with
 Variational Inference for High-Dimensional Survival Analysis.
+Mathematics 2026, 14, 3763. https://doi.org/10.3390/math14203763
+```
+
+**Software:**
+
+```text
+Doroh, B.I.; Dauda, K.A. AGP-VI and Gaussian-IGH-VI: Code for
+A Hierarchical Bayesian Cox Model with Variational Inference (v1.0.0).
+Zenodo, 2026. https://doi.org/10.5281/zenodo.23558120
+```
+
+**BibTeX:**
+
+```bibtex
+@article{doroh2026hierarchical,
+  author  = {Doroh, B. I. and Dauda, K. A.},
+  title   = {A Hierarchical Bayesian Cox Model with Variational Inference
+             for High-Dimensional Survival Analysis},
+  journal = {Mathematics},
+  year    = {2026},
+  volume  = {14},
+  number  = {20},
+  pages   = {3763},
+  doi     = {10.3390/math14203763}
+}
+
+@software{doroh2026code,
+  author    = {Doroh, B. I. and Dauda, K. A.},
+  title     = {AGP-VI and Gaussian-IGH-VI: Code for A Hierarchical
+               Bayesian Cox Model with Variational Inference},
+  version   = {v1.0.0},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.23558120}
+}
 ```
 
 ---
