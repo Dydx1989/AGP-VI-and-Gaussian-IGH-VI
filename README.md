@@ -1,12 +1,12 @@
 #  A Hierarchical Bayesian Cox Model with Variational Inference for High-Dimensional Survival Analysis
 
-A hierarchical Bayesian variational inference methods for high-dimensional Cox survival models, including AGP-VI and Global-Local Gaussian–IGH-VI with simulation studies, real genomic survival datasets, RSF feature screening, ELBO diagnostics, and time-dependent AUC analysis.
+A Hierarchical Bayesian variational inference methods for high-dimensional Cox survival models, including AGP-VI and Global-Local Gaussian–IGH-VI with simulation studies, real genomic survival datasets, RSF feature screening, ELBO diagnostics, and time-dependent AUC analysis.
 
 ## Overview
 
 This repository contains the complete reproducibility materials for the paper:
 
-> **A Robust Hierarchical Bayesian Cox Model with Variational Inference for High-Dimensional Survival Analysis**
+> **A Hierarchical Bayesian Cox Model with Variational Inference for High-Dimensional Survival Analysis**
 
 The project develops scalable hierarchical Bayesian variational inference methods for high-dimensional Cox proportional hazards models under sparse survival settings.
 
@@ -34,37 +34,7 @@ The following methods are implemented and compared throughout the paper:
 
 ---
 
-# Repository Structure
-
-```text
-.
-├── R/
-│   ├── 00_packages.R
-│   ├── 01_simulate_data.R
-│   ├── 02_common_functions.R
-│   ├── 03_fit_agp_vi.R
-│   ├── 04_fit_igh_vi.R
-│   ├── 04b_fit_gl_blended_igh_vi.R
-│   ├── 05_fit_existing_methods.R
-│   ├── 06_evaluation.R
-│   ├── 07_summary_latex.R
-│   └── 08_plots.R
-│
-├──run_simulation_four_methods
-├──results/
-├── figures/
-├── 10_real_data_analysis_six_datasets.R
-├── chop.csv
-├── results/
-├── figures/
-
-```
-
----
-
 # Methodological Framework
-
-The proposed framework introduces robust hierarchical Bayesian Cox proportional hazards models with scalable variational inference for high-dimensional survival analysis.
 
 The methodology is designed to address:
 
@@ -278,19 +248,6 @@ beta_value = 1.20
 censoring_rate = 0.50
 ```
 
-## Performance Metrics
-
-The following metrics are reported:
-
-* Harrell's C-index
-* Brier Score
-* Time-dependent AUC
-* True Positive Rate (TPR)
-* False Positive Rate (FPR)
-* Variable selection accuracy
-* Computational runtime
-
----
 
 # Real-Life Survival Datasets
 
@@ -320,14 +277,6 @@ The screening procedure:
 3. Selects variables exceeding a quantile importance threshold
 4. Passes selected covariates into the survival models
 
-Typical configuration:
-
-```r
-quantile_cutoff = 0.95
-min_p = 20
-max_p = 1000
-ntree = 500
-```
 
 ---
 
@@ -366,75 +315,6 @@ BiocManager::install(c(
 
 ---
 
-# Running Simulation Experiments
-
-```r
-source("run_simulation_four_methods.R")
-```
-
-Outputs include:
-
-* Simulation summary tables
-* LaTeX tables
-* ELBO convergence plots
-* Time-dependent AUC figures
-* Integrated Brier Score plots
-
----
-
-# Running Real-Life Data Analyses
-
-```r
-source("10_real_data_analysis_six_datasets.R")
-```
-
-Outputs are automatically saved in:
-
-```text
-results/real_data/
-figures/real_data/
-```
-
----
-
-# Output Files
-
-The repository automatically generates:
-
-## Tables
-
-* Simulation summary tables
-* Real-data performance tables
-* Publication-ready LaTeX tables
-
-## Figures
-
-* ELBO convergence diagnostics
-* Coefficient recovery plots
-* Time-dependent AUC panels
-* Integrated Brier Score plots
-
-## CSV Results
-
-* Raw performance metrics
-* Time-dependent AUC values
-* RSF-selected variables
-
----
-
-# Reproducibility
-
-All experiments are fully reproducible.
-
-Set the random seed before execution:
-
-```r
-set.seed(2026)
-```
-
-All scripts used to generate the manuscript results are included in this repository.
-
----
 
 # Citation
 
