@@ -653,11 +653,11 @@ load_ovarian <- function() {
 
 real_datasets <- list(
   load_pbc_data()
-  #load_dbcd_data("DBCD_Data.csv"),
-  #load_chop_data("chop.csv"),
-  #load_nki70(),
-  #load_vdx(),
-  #load_ovarian()
+  load_dbcd_data("DBCD_Data.csv"),
+  load_chop_data("chop.csv"),
+  load_nki70(),
+  load_vdx(),
+  load_ovarian()
 )
 
 real_results <- list()
