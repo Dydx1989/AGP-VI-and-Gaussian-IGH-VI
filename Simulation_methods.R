@@ -39,7 +39,7 @@ if (!dir.exists("figures/simulation")) {
 
 set.seed(202236)
 
-n_rep <- 5
+n_rep <- as.integer(Sys.getenv("N_REP", "20"))
 n <- 100
 
 p_grid <- c(
@@ -55,6 +55,8 @@ censoring_rate <- 0.50
 train_fraction <- 0.70
 absolute_threshold <- 0.15
 z_threshold <- 2.33
+selection_method <- "auto"
+credible_level <- 0.95
 raw_list <- list()
 counter <- 1
 saved_vi_plots <- FALSE
@@ -150,7 +152,9 @@ for (pp in p_grid) {
       beta_true = simulated_data$beta_true,
       eval_time = eval_time,
       threshold = absolute_threshold,
-      z_threshold = z_threshold
+      z_threshold = z_threshold,
+      selection_method = selection_method,
+      credible_level = credible_level
     )
     
     result_cox_lasso$Time_s <- time_cox_lasso
@@ -191,7 +195,9 @@ for (pp in p_grid) {
       beta_true = simulated_data$beta_true,
       eval_time = eval_time,
       threshold = absolute_threshold,
-      z_threshold = z_threshold
+      z_threshold = z_threshold,
+      selection_method = selection_method,
+      credible_level = credible_level
     )
     
     result_elasticnet$Method <- "Cox-ElasticNet"
@@ -236,7 +242,9 @@ for (pp in p_grid) {
       beta_true = simulated_data$beta_true,
       eval_time = eval_time,
       threshold = absolute_threshold,
-      z_threshold = z_threshold
+      z_threshold = z_threshold,
+      selection_method = selection_method,
+      credible_level = credible_level
     )
     
     result_bayes_lasso$Method <- "Bayesian-Lasso-Cox"
@@ -253,13 +261,12 @@ for (pp in p_grid) {
         time = split_data$time_train,
         status = split_data$status_train,
         max_iter = vi_max_iter,
-        eta = 0.001,
+        eta = 1.0,
         tol = 1e-4,
         init_var = 0.5,
         min_var = 1e-4,
         max_var = 5,
         ridge = 0.05,
-        grad_clip = 5,
         block_size = 5,
         corr_shrinkage = 0.3,
         verbose = FALSE
@@ -293,7 +300,9 @@ for (pp in p_grid) {
       beta_true = simulated_data$beta_true,
       eval_time = eval_time,
       threshold = absolute_threshold,
-      z_threshold = z_threshold
+      z_threshold = z_threshold,
+      selection_method = selection_method,
+      credible_level = credible_level
     )
     
     result_agp$Time_s <- time_agp
@@ -316,7 +325,7 @@ for (pp in p_grid) {
         b0 = 2,
         blend_weight = 0.90,
         max_iter = vi_max_iter,
-        eta = 0.001,
+        eta = 1.0,
         tol = 1e-4,
         init_var = 0.5,
         min_var = 1e-4,
@@ -324,7 +333,6 @@ for (pp in p_grid) {
         min_global_var = 0.05,
         max_global_var = 10,
         ridge = 0.04,
-        grad_clip = 5,
         block_size = 10,
         corr_shrinkage = 0.3,
         verbose = FALSE
@@ -366,7 +374,9 @@ for (pp in p_grid) {
       beta_true = simulated_data$beta_true,
       eval_time = eval_time,
       threshold = absolute_threshold,
-      z_threshold = z_threshold
+      z_threshold = z_threshold,
+      selection_method = selection_method,
+      credible_level = credible_level
     )
     
     result_gl_igh$Method <- "Global-Local Gaussian–IGH-VI"
