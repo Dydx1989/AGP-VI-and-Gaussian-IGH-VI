@@ -1,6 +1,14 @@
 
 # ============================================================================
-# 10_real_data_analysis_six_datasets.R
+# REPRODUCIBILITY FIX (added 2026-08-08)
+#
+# real-data results to be reproducible and citable.
+Sys.setenv(OMP_NUM_THREADS = "1")
+options(rf.cores = 1, mc.cores = 1)
+# ============================================================================
+
+# ============================================================================
+# Real_data_analysis_six_datasets.R
 # Six real-life survival datasets:
 # PBC, DBCD, CHOP, NKI70, VDX, TCGA Ovarian
 # ============================================================================
@@ -18,6 +26,17 @@ source("R/08_plots.R")
 
 dir.create("results/real_data", recursive = TRUE, showWarnings = FALSE)
 dir.create("figures/real_data", recursive = TRUE, showWarnings = FALSE)
+
+old_results_files <- list.files("results/real_data", full.names = TRUE, recursive = TRUE)
+if (length(old_results_files) > 0) {
+  file.remove(old_results_files)
+  cat("Cleared", length(old_results_files), "old file(s) from results/real_data/\n")
+}
+old_figure_files <- list.files("figures/real_data", full.names = TRUE, recursive = TRUE)
+if (length(old_figure_files) > 0) {
+  file.remove(old_figure_files)
+  cat("Cleared", length(old_figure_files), "old file(s) from figures/real_data/\n")
+}
 
 extra_cran <- c(
   "survival", "randomForestSRC", "timeROC", "glmnet",
@@ -53,8 +72,19 @@ rsf_ntree <- 500
 absolute_threshold <- 0.15
 z_threshold <- 2.33
 selection_rule <- "or"
+selection_method <- "auto"  # covariance methods: 95% CI; penalized Cox: native nonzero
+credible_level <- 0.95
 
-vi_max_iter <- 150
+vi_max_iter <- 1000
+gl_vi_max_iter <- 1000
+gl_restart_on_failure <- TRUE
+gl_stall_patience <- 30
+
+gl_multistart_mode <- Sys.getenv("GL_MULTISTART_MODE", "adaptive")
+if (!gl_multistart_mode %in% c("adaptive", "always")) {
+  gl_multistart_mode <- "adaptive"
+}
+gl_temper_scales <- c(0, 0.25, 0.50, 0.75, 1.00)
 vi_block_size <- 10
 
 bayes_chains <- 2
@@ -72,15 +102,35 @@ make_numeric_matrix <- function(X) {
   storage.mode(X) <- "double"
 
   keep <- apply(X, 2, function(z) {
-    stats::sd(z, na.rm = TRUE) > 0 && all(is.finite(z))
+    zf <- z[is.finite(z)]
+    length(zf) >= 2 && is.finite(stats::sd(zf)) && stats::sd(zf) > 0
   })
-
   X[, keep, drop = FALSE]
 }
 
-standardize_x <- function(X) {
-  X <- make_numeric_matrix(X)
-  X <- scale(X)
+fit_train_preprocessor <- function(X_train) {
+  X_train <- make_numeric_matrix(X_train)
+  med <- apply(X_train, 2, function(z) stats::median(z[is.finite(z)], na.rm = TRUE))
+  X_imp <- X_train
+  for (j in seq_len(ncol(X_imp))) {
+    bad <- !is.finite(X_imp[, j])
+    if (any(bad)) X_imp[bad, j] <- med[j]
+  }
+  mu <- colMeans(X_imp)
+  sig <- apply(X_imp, 2, stats::sd)
+  keep <- is.finite(sig) & sig > 0 & is.finite(mu) & is.finite(med)
+  list(columns = colnames(X_imp)[keep], median = med[keep], mean = mu[keep], sd = sig[keep])
+}
+
+apply_train_preprocessor <- function(X, prep) {
+  X <- as.matrix(X[, prep$columns, drop = FALSE])
+  storage.mode(X) <- "double"
+  for (j in seq_len(ncol(X))) {
+    bad <- !is.finite(X[, j])
+    if (any(bad)) X[bad, j] <- prep$median[j]
+  }
+  X <- sweep(X, 2, prep$mean, "-")
+  X <- sweep(X, 2, prep$sd, "/")
   X[!is.finite(X)] <- 0
   X
 }
@@ -90,13 +140,16 @@ make_split <- function(X, time, status, train_fraction = 0.70, seed = 2026) {
   n <- nrow(X)
   train_id <- sample(seq_len(n), size = floor(train_fraction * n))
 
+  test_id <- setdiff(seq_len(n), train_id)
   list(
+    train_id = train_id,
+    test_id = test_id,
     X_train = X[train_id, , drop = FALSE],
-    X_test = X[-train_id, , drop = FALSE],
+    X_test = X[test_id, , drop = FALSE],
     time_train = time[train_id],
-    time_test = time[-train_id],
+    time_test = time[test_id],
     status_train = status[train_id],
-    status_test = status[-train_id]
+    status_test = status[test_id]
   )
 }
 
@@ -116,115 +169,81 @@ screen_by_rsf_quantile <- function(X,
                                    ntree = 500,
                                    seed = 2026) {
   set.seed(seed)
-  
-  X <- scale(data.matrix(X))
-  X[!is.finite(X)] <- 0
-  
-  # Important: force safe predictor names
-  colnames(X) <- paste0("X", seq_len(ncol(X)))
-  
+
+  X <- make_numeric_matrix(X)
+  original_names <- colnames(X)
+  if (is.null(original_names)) original_names <- paste0("V", seq_len(ncol(X)))
+  safe_names <- paste0("X", seq_len(ncol(X)))
+  colnames(X) <- safe_names
+
+  name_map <- data.frame(
+    Internal_Name = safe_names,
+    Original_Variable = original_names,
+    stringsAsFactors = FALSE
+  )
+
   T <- as.numeric(time)
   event <- as.integer(status)
-  
-  train_data_rf <- data.frame(
-    T = T,
-    event = event,
-    X,
-    check.names = FALSE
-  )
-  
-  rf_model <- rfsrc(
+  train_data_rf <- data.frame(T = T, event = event, X, check.names = FALSE)
+
+  # randomForestSRC parses survival formulas internally and expects the
+  # response call to be exactly Surv(...), not survival::Surv(...).  The
+  # namespace-qualified form can trigger parseFormula() errors on current
+  # randomForestSRC versions.
+  rf_model <- randomForestSRC::rfsrc(
     Surv(T, event) ~ .,
     data = train_data_rf,
     ntree = ntree,
     importance = TRUE,
-    na.action = "na.impute"
+    na.action = "na.impute",
+    seed = -abs(as.integer(seed))
   )
-  
+
   importance_scores <- randomForestSRC::vimp(rf_model)$importance
   importance_scores[!is.finite(importance_scores)] <- 0
-  
-  # Keep only variables that still match X column names
-  importance_scores <- importance_scores[
-    names(importance_scores) %in% colnames(X)
-  ]
-  
+  importance_scores <- importance_scores[names(importance_scores) %in% safe_names]
+
   cutoff_importance <- stats::quantile(
     importance_scores,
     quantile_cutoff,
-    na.rm = TRUE
+    na.rm = TRUE,
+    names = FALSE
   )
-  
-  selected_features <- names(
-    importance_scores[importance_scores > cutoff_importance]
-  )
-  
-  ranked_features <- names(
-    sort(
-      importance_scores,
-      decreasing = TRUE
-    )
-  )
-  
-  if (length(selected_features) < min_p) {
-    selected_features <- ranked_features[
-      seq_len(
-        min(
-          min_p,
-          length(ranked_features)
-        )
-      )
-    ]
+
+  selected_internal <- names(importance_scores[importance_scores > cutoff_importance])
+  ranked_internal <- names(sort(importance_scores, decreasing = TRUE))
+
+  if (length(selected_internal) < min_p) {
+    selected_internal <- ranked_internal[seq_len(min(min_p, length(ranked_internal)))]
   }
-  
-  if (length(selected_features) > max_p) {
-    selected_features <- ranked_features[
-      seq_len(max_p)
-    ]
+  if (length(selected_internal) > max_p) {
+    selected_internal <- ranked_internal[seq_len(min(max_p, length(ranked_internal)))]
   }
-  
-  # Final protection against subscript errors
-  selected_features <- intersect(
-    selected_features,
-    colnames(X)
-  )
-  
-  if (length(selected_features) == 0) {
-    selected_features <- ranked_features[
-      seq_len(
-        min(
-          min_p,
-          length(ranked_features)
-        )
-      )
-    ]
+  selected_internal <- intersect(selected_internal, safe_names)
+  if (length(selected_internal) == 0) {
+    selected_internal <- ranked_internal[seq_len(min(min_p, length(ranked_internal)))]
   }
-  
-  X_filtered <- X[
-    ,
-    selected_features,
-    drop = FALSE
+
+  selected_original <- name_map$Original_Variable[
+    match(selected_internal, name_map$Internal_Name)
   ]
-  
+
   cat("\nRSF screening summary\n")
   cat("Original p:", ncol(X), "\n")
-  cat("Selected p:", ncol(X_filtered), "\n")
+  cat("Selected p:", length(selected_original), "\n")
   cat("Quantile cutoff:", quantile_cutoff, "\n")
   cat("Importance cutoff:", as.numeric(cutoff_importance), "\n")
-  
+
   list(
-    X_selected = X_filtered,
-    selected_variables = selected_features,
-    importance = importance_scores[selected_features],
+    selected_variables = selected_original,
+    selected_internal = selected_internal,
+    importance = unname(importance_scores[selected_internal]),
     all_importance = importance_scores,
-    threshold_rule = paste0(
-      "RSF importance > ",
-      quantile_cutoff,
-      " quantile"
-    ),
+    name_map = name_map,
+    threshold_rule = paste0("Training-only RSF importance > ", quantile_cutoff, " quantile"),
     threshold_value = as.numeric(cutoff_importance),
     original_p = ncol(X),
-    selected_p = ncol(X_filtered),
+    selected_p = length(selected_original),
     rsf_fit = rf_model
   )
 }
@@ -263,6 +282,8 @@ evaluate_real_model <- function(fit,
                                 threshold = 0.15,
                                 z_threshold = 2.33,
                                 selection_rule = "or",
+                                selection_method = "auto",
+                                credible_level = 0.95,
                                 auc_times = NULL) {
   beta_hat <- fit$beta
 
@@ -307,7 +328,9 @@ evaluate_real_model <- function(fit,
     fit = fit,
     absolute_threshold = threshold,
     z_threshold = z_threshold,
-    rule = selection_rule
+    rule = selection_rule,
+    selection_method = selection_method,
+    credible_level = credible_level
   )
 
   if (is.null(auc_times)) {
@@ -420,11 +443,15 @@ plot_auc_panel <- function(auc_results, datasets, save_path, title_text) {
 
 load_pbc_data <- function() {
   data(pbc, package = "survival")
+  # Preserve the same complete-case PBC cohort used in v5/v9 (n = 276) so
+  # results remain directly comparable across package versions.  This filter
+  # is performed before outcome modelling and no full-data standardization is
+  # applied; scaling is still learned from the training partition only.
   pbc <- na.omit(pbc)
   time <- as.numeric(pbc$time)
   status <- as.integer(pbc$status == 2)
   X <- pbc[, -c(1, 2, 3), drop = FALSE]
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
 
   list(name = "PBC", X = X, time = time, status = status)
 }
@@ -435,12 +462,11 @@ load_dbcd_data <- function(file_path = "DBCD_Data.csv") {
   }
 
   DBCD_Data <- read.csv(file_path)
-  DBCD_Data <- na.omit(DBCD_Data)
   DBCD_Data$status <- as.integer(DBCD_Data$status)
   DBCD_Data$time <- as.numeric(DBCD_Data$time)
 
   X <- DBCD_Data[, -c(1, 2), drop = FALSE]
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
 
   list(name = "DBCD", X = X, time = DBCD_Data$time, status = DBCD_Data$status)
 }
@@ -452,7 +478,6 @@ load_chop_data <- function(file_path = "chop.csv") {
 
   Datachop <- read.csv(file_path)
   Datachop <- Datachop[, -1, drop = FALSE]
-  Datachop <- na.omit(Datachop)
   Datachop$status <- as.integer(Datachop$status)
   Datachop$survtime <- as.numeric(Datachop$survtime)
 
@@ -463,7 +488,7 @@ load_chop_data <- function(file_path = "chop.csv") {
   Datachop <- Datachop[keep, , drop = FALSE]
 
   X <- Datachop[, -c(1, 2), drop = FALSE]
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
 
   list(name = "CHOP", X = X, time = Datachop$survtime, status = Datachop$status)
 }
@@ -473,7 +498,7 @@ load_nki70 <- function() {
   time <- as.numeric(nki70$time)
   status <- as.integer(nki70$event)
   X <- nki70[, !(names(nki70) %in% c("time", "event")), drop = FALSE]
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
 
   list(name = "NKI70", X = X, time = time, status = status)
 }
@@ -496,7 +521,7 @@ load_vdx <- function() {
   X <- X[keep, , drop = FALSE]
   time <- time[keep]
   status <- status[keep]
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
 
   list(name = "VDX", X = X, time = time, status = status)
 }
@@ -608,7 +633,7 @@ load_ovarian <- function() {
     )
   }
   
-  X <- standardize_x(X)
+  X <- make_numeric_matrix(X)
   
   cat("\n====================================\n")
   cat("Dataset: TCGA Ovarian\n")
@@ -627,19 +652,31 @@ load_ovarian <- function() {
 }
 
 real_datasets <- list(
-  load_pbc_data(),
-  load_dbcd_data("DBCD_Data.csv"),
-  load_chop_data("chop.csv"),
-  load_nki70(),
-  load_vdx(),
-  load_ovarian()
+  load_pbc_data()
+  #load_dbcd_data("DBCD_Data.csv"),
+  #load_chop_data("chop.csv"),
+  #load_nki70(),
+  #load_vdx(),
+  #load_ovarian()
 )
 
 real_results <- list()
 auc_results <- list()
 counter <- 1
 
-for (dat in real_datasets) {
+
+# ============================================================================
+# Persist all fitted VI models from all six datasets
+# ============================================================================
+
+all_agp_fits <- list()
+all_gl_fits <- list()
+
+fit_dir <- "results/real_data/fits"
+dir.create(fit_dir, recursive = TRUE, showWarnings = FALSE)
+
+
+for (dat in real_datasets ) {
   cat("\n========================================\n")
   cat("Real dataset:", dat$name, "\n")
   cat("Original n =", nrow(dat$X), " original p =", ncol(dat$X), "\n")
@@ -659,46 +696,9 @@ for (dat in real_datasets) {
   cat("After removing invalid survival times:\n")
   cat("Remaining n =", nrow(dat$X), "\n")
 
-  if (ncol(dat$X) <= 100) {
-    rsf_screen <- list(
-      X_selected = dat$X,
-      selected_variables = colnames(dat$X),
-      importance = rep(NA_real_, ncol(dat$X)),
-      threshold_rule = "No screening: p <= 100",
-      threshold_value = NA_real_,
-      original_p = ncol(dat$X),
-      selected_p = ncol(dat$X)
-    )
-  } else {
-    rsf_screen <- screen_by_rsf_quantile(
-      X = dat$X,
-      time = dat$time,
-      status = dat$status,
-      quantile_cutoff = rsf_quantile_cutoff,
-      min_p = rsf_min_p,
-      max_p = rsf_max_p,
-      ntree = rsf_ntree,
-      seed = 2026
-    )
-  }
-
-  dat$X <- rsf_screen$X_selected
-
-  cat("\nAfter RSF screening:\n")
-  cat("Selected p =", ncol(dat$X), "\n")
-  cat("Threshold rule =", rsf_screen$threshold_rule, "\n")
-  cat("Threshold value =", rsf_screen$threshold_value, "\n")
-
-  write.csv(
-    data.frame(
-      Variable = rsf_screen$selected_variables,
-      Importance = as.numeric(rsf_screen$importance)
-    ),
-    paste0("results/real_data/RSF_selected_variables_", safe_dataset_name(dat$name), ".csv"),
-    row.names = FALSE
-  )
-
-  split <- make_split(
+  # Split FIRST. All supervised screening, imputation and scaling below use
+  # the training set only so the test outcomes remain untouched.
+  split_raw <- make_split(
     X = dat$X,
     time = dat$time,
     status = dat$status,
@@ -706,9 +706,65 @@ for (dat in real_datasets) {
     seed = 2026
   )
 
+  if (ncol(split_raw$X_train) <= 100) {
+    selected_variables <- colnames(split_raw$X_train)
+    rsf_screen <- list(
+      selected_variables = selected_variables,
+      importance = rep(NA_real_, length(selected_variables)),
+      threshold_rule = "No screening: p <= 100",
+      threshold_value = NA_real_,
+      original_p = ncol(split_raw$X_train),
+      selected_p = length(selected_variables)
+    )
+  } else {
+    rsf_screen <- screen_by_rsf_quantile(
+      X = split_raw$X_train,
+      time = split_raw$time_train,
+      status = split_raw$status_train,
+      quantile_cutoff = rsf_quantile_cutoff,
+      min_p = rsf_min_p,
+      max_p = rsf_max_p,
+      ntree = rsf_ntree,
+      seed = 2026
+    )
+    selected_variables <- rsf_screen$selected_variables
+  }
+
+  # Apply the training-selected variables to both partitions, then fit a
+  # median-imputation + standardization recipe on training predictors only.
+  X_train_selected <- split_raw$X_train[, selected_variables, drop = FALSE]
+  X_test_selected <- split_raw$X_test[, selected_variables, drop = FALSE]
+  prep <- fit_train_preprocessor(X_train_selected)
+
+  split <- split_raw
+  split$X_train <- apply_train_preprocessor(X_train_selected, prep)
+  split$X_test <- apply_train_preprocessor(X_test_selected, prep)
+
+  # If preprocessing removed a zero-variance training variable, keep the RSF
+  # metadata aligned with the columns actually fitted by the models.
+  selected_variables_final <- colnames(split$X_train)
+  keep_rsf <- match(selected_variables_final, rsf_screen$selected_variables)
+  selected_importance_final <- rsf_screen$importance[keep_rsf]
+
+  cat("\nAfter training-only RSF/preprocessing:\n")
+  cat("Selected p =", ncol(split$X_train), "\n")
+  cat("Threshold rule =", rsf_screen$threshold_rule, "\n")
+  cat("Threshold value =", rsf_screen$threshold_value, "\n")
+
+  write.csv(
+    data.frame(
+      Variable = selected_variables_final,
+      Importance = as.numeric(selected_importance_final)
+    ),
+    paste0("results/real_data/RSF_selected_variables_", safe_dataset_name(dat$name), ".csv"),
+    row.names = FALSE
+  )
+
+  # Evaluation horizons are determined from TRAINING survival times, never
+  # from test outcomes.
   times_auc <- as.numeric(
     quantile(
-      split$time_test[split$status_test == 1],
+      split$time_train[split$status_train == 1],
       probs = c(0.25, 0.50, 0.75),
       na.rm = TRUE
     )
@@ -718,7 +774,7 @@ for (dat in real_datasets) {
   if (length(times_auc) < 2) {
     times_auc <- as.numeric(
       quantile(
-        split$time_test,
+        split$time_train,
         probs = c(0.25, 0.50, 0.75),
         na.rm = TRUE
       )
@@ -751,25 +807,126 @@ for (dat in real_datasets) {
     split$time_train,
     split$status_train,
     max_iter = vi_max_iter,
+    eta = 0.001,
     block_size = vi_block_size
   )
   time_agp <- proc.time()[3] - t0
 
   t0 <- proc.time()[3]
-  fit_gl <- fit_gl_blended_igh_vi(
-    split$X_train,
-    split$time_train,
-    split$status_train,
-    max_iter = vi_max_iter,
-    block_size = vi_block_size
+
+  # general adaptive  GL-IGH-VI.
+  fit_gl <- fit_gl_blended_igh_vi_adaptive(
+    X = split$X_train,
+    time = split$time_train,
+    status = split$status_train,
+    agp_fit = fit_agp,
+    temper_scales = gl_temper_scales,
+    multistart_mode = gl_multistart_mode,
+    fallback_fraction_trigger = 0.10,
+    verbose_multistart = TRUE,
+    max_iter = gl_vi_max_iter,
+    eta = 1.0,
+    tol = 1e-4,
+    patience = 5,
+    stall_patience = gl_stall_patience,
+    block_size = vi_block_size,
+    rescue_mean_only = TRUE,
+    rescue_raw_gradient = TRUE
   )
+
   time_gl <- proc.time()[3] - t0
+
+  # Save initialization diagnostics for every dataset.
+  if (!is.null(fit_gl$multistart_diagnostics)) {
+    write.csv(
+      fit_gl$multistart_diagnostics,
+      paste0(
+        "results/real_data/GL_IGH_multistart_",
+        safe_dataset_name(dat$name),
+        ".csv"
+      ),
+      row.names = FALSE
+    )
+  }
+
+  # Posterior coefficient diagnostics: useful for detecting artificial
+  # plateaus and for auditing credible-interval selection.
+  gl_se <- sqrt(pmax(diag(fit_gl$covariance), 1e-12))
+  gl_z <- abs(fit_gl$beta) / gl_se
+  gl_zcrit <- stats::qnorm(1 - (1 - credible_level) / 2)
+  gl_diag <- data.frame(
+    Variable = colnames(split$X_train),
+    Beta = as.numeric(fit_gl$beta),
+    Posterior_SE = gl_se,
+    CI_Lower = fit_gl$beta - gl_zcrit * gl_se,
+    CI_Upper = fit_gl$beta + gl_zcrit * gl_se,
+    Z_Abs = gl_z,
+    Selected_95CI = (fit_gl$beta - gl_zcrit * gl_se > 0) | (fit_gl$beta + gl_zcrit * gl_se < 0),
+    stringsAsFactors = FALSE
+  )
+  write.csv(gl_diag,
+            paste0("results/real_data/GL_IGH_posterior_diagnostics_", safe_dataset_name(dat$name), ".csv"),
+            row.names = FALSE)
+
+  # DIAGNOSTIC (added to investigate the Mean_Selected=0 anomaly seen on
+  # CHOP/DBCD/NKI70
+  
+  cat(sprintf(
+    paste0(
+      "  [diagnostic] %s GL-IGH-VI: status=%s, p=%d, iterations=%d, ",
+      "n_fallback_used=%d, max_failed_streak=%d, multistart=%s, selected_start=%s
+"
+    ),
+    dat$name,
+    fit_gl$convergence_status,
+    ncol(split$X_train),
+    fit_gl$iterations,
+    fit_gl$n_fallback_used,
+    fit_gl$max_failed_step_streak,
+    ifelse(isTRUE(fit_gl$multistart_used), "TRUE", "FALSE"),
+    ifelse(
+      is.null(fit_gl$selected_start_label),
+      "cold",
+      fit_gl$selected_start_label
+    )
+  ))
+
+  print_elbo_diagnostics(fit_gl, "GL-IGH-VI", dat$name)
+
+
+  # single-panel plot.
+  plot_vi_elbo_two_panel(
+    fit_gl,
+    paste(dat$name, "GL-IGH-VI"),
+    paste0("figures/real_data/", safe_dataset_name(dat$name), "_GL_IGH_ELBO_two_panel.png")
+  )
 
   fit_lasso$method <- "Cox-Lasso"
   fit_enet$method <- "Cox-ElasticNet"
   fit_bayes$method <- "Bayesian-Lasso-Cox"
   fit_agp$method <- "AGP-VI"
   fit_gl$method <- "Global-Local Gaussian–IGH-VI"
+
+
+  # ------------------------------------------------------------------------
+  # Preserve current dataset fits before the loop advances
+  # ------------------------------------------------------------------------
+
+  dataset_key <- safe_dataset_name(dat$name)
+
+  all_agp_fits[[dat$name]] <- fit_agp
+  all_gl_fits[[dat$name]] <- fit_gl
+
+  saveRDS(
+    fit_agp,
+    file.path(fit_dir, paste0(dataset_key, "_AGP_VI_fit.rds"))
+  )
+
+  saveRDS(
+    fit_gl,
+    file.path(fit_dir, paste0(dataset_key, "_GL_IGH_VI_fit.rds"))
+  )
+
 
   fits <- list(
     "Cox-Lasso" = fit_lasso,
@@ -799,6 +956,8 @@ for (dat in real_datasets) {
       threshold = absolute_threshold,
       z_threshold = z_threshold,
       selection_rule = selection_rule,
+      selection_method = selection_method,
+      credible_level = credible_level,
       auc_times = times_auc
     )
 
@@ -817,10 +976,45 @@ for (dat in real_datasets) {
     result$Dataset <- dat$name
     result$Original_n <- original_n
     result$Original_p <- original_p
-    result$RSF_Selected_p <- ncol(dat$X)
+    result$RSF_Selected_p <- ncol(split$X_train)
     result$RSF_Threshold_Rule <- rsf_screen$threshold_rule
     result$RSF_Threshold_Value <- as.numeric(rsf_screen$threshold_value)
     result$Time_s <- as.numeric(unname(runtimes[method_name]))
+    result$Convergence_Status <- if (!is.null(fits[[method_name]]$convergence_status)) fits[[method_name]]$convergence_status else NA_character_
+    result$Fallbacks <- if (!is.null(fits[[method_name]]$n_fallback_used)) fits[[method_name]]$n_fallback_used else NA_integer_
+    result$Max_Failed_Step_Streak <- if (!is.null(fits[[method_name]]$max_failed_step_streak)) fits[[method_name]]$max_failed_step_streak else NA_integer_
+    result$Adaptive_Restart <- if (identical(method_name, "Global-Local Gaussian–IGH-VI")) {
+      if (!is.null(fits[[method_name]]$adaptive_restart_used)) {
+        isTRUE(fits[[method_name]]$adaptive_restart_used)
+      } else {
+        FALSE
+      }
+    } else {
+      NA
+    }
+
+    result$Multistart_Used <- if (identical(method_name, "Global-Local Gaussian–IGH-VI")) {
+      if (!is.null(fits[[method_name]]$multistart_used)) {
+        isTRUE(fits[[method_name]]$multistart_used)
+      } else {
+        FALSE
+      }
+    } else {
+      NA
+    }
+
+    result$Selected_Start <- if (identical(method_name, "Global-Local Gaussian–IGH-VI")) {
+      if (!is.null(fits[[method_name]]$selected_start_label)) {
+        as.character(fits[[method_name]]$selected_start_label)
+      } else {
+        "cold"
+      }
+    } else {
+      NA_character_
+    }
+    sel_tmp <- select_variables(fits[[method_name]], selection_method = selection_method, credible_level = credible_level)
+    result$Selection_Method <- sel_tmp$selection_method
+    result$Credible_Level <- sel_tmp$credible_level
 
     result <- result[
       ,
@@ -836,13 +1030,42 @@ for (dat in real_datasets) {
         "Brier_Score",
         "Mean_Time_Dependent_AUC",
         "Mean_Selected",
-        "Time_s"
+        "Time_s",
+        "Convergence_Status",
+        "Fallbacks",
+        "Max_Failed_Step_Streak",
+        "Adaptive_Restart",
+        "Multistart_Used",
+        "Selected_Start",
+        "Selection_Method",
+        "Credible_Level"
       )
     ]
 
     real_results[[counter]] <- result
     counter <- counter + 1
   }
+
+  cat(
+    "\n[PLOT CHECK]", dat$name,
+    "AGP-VI:",
+    "iterations =", length(fit_agp$elbo),
+    "final ELBO =", tail(fit_agp$elbo, 1),
+    "status =",
+    ifelse(is.null(fit_agp$convergence_status), "unknown", fit_agp$convergence_status),
+    "\n"
+  )
+
+  cat(
+    "[PLOT CHECK]", dat$name,
+    "GL-IGH-VI:",
+    "iterations =", length(fit_gl$elbo),
+    "final ELBO =", tail(fit_gl$elbo, 1),
+    "status =", fit_gl$convergence_status,
+    "start =",
+    ifelse(is.null(fit_gl$selected_start_label), "cold", fit_gl$selected_start_label),
+    "\n"
+  )
 
   plot_vi_elbo(
     fit_agp,
@@ -858,6 +1081,19 @@ for (dat in real_datasets) {
 
   gc()
 }
+
+
+# Save collections of all six VI fits for later inspection
+saveRDS(
+  all_agp_fits,
+  file.path(fit_dir, "ALL_AGP_VI_fits.rds")
+)
+
+saveRDS(
+  all_gl_fits,
+  file.path(fit_dir, "ALL_GL_IGH_VI_fits.rds")
+)
+
 
 real_results <- dplyr::bind_rows(real_results)
 auc_results <- do.call(rbind, auc_results)
@@ -886,18 +1122,16 @@ latex_real_table <- real_summary_results |>
   ) |>
   dplyr::group_by(Dataset) |>
   dplyr::mutate(
-    rank_cindex = rank(-C_index_num, ties.method = "min"),
-    rank_brier = rank(Brier_Score_num, ties.method = "min"),
-    rank_auc = rank(-AUC_num, ties.method = "min"),
-    overall_rank_score = rank_cindex + rank_brier + rank_auc,
-    Best_Method = overall_rank_score == min(overall_rank_score, na.rm = TRUE)
+    Best_C_index = is.finite(C_index) & abs(C_index - max(C_index, na.rm = TRUE)) < 1e-12,
+    Best_Brier = is.finite(Brier_Score) & abs(Brier_Score - min(Brier_Score, na.rm = TRUE)) < 1e-12,
+    Best_AUC = is.finite(Mean_Time_Dependent_AUC) & abs(Mean_Time_Dependent_AUC - max(Mean_Time_Dependent_AUC, na.rm = TRUE)) < 1e-12
   ) |>
   dplyr::ungroup() |>
   dplyr::mutate(
-    C_index = ifelse(Best_Method, paste0("\\textbf{", sprintf("%.4f", C_index_num), "}"), sprintf("%.4f", C_index_num)),
-    Brier_Score = ifelse(Best_Method, paste0("\\textbf{", sprintf("%.4f", Brier_Score_num), "}"), sprintf("%.4f", Brier_Score_num)),
-    Mean_Time_Dependent_AUC = ifelse(Best_Method, paste0("\\textbf{", sprintf("%.4f", AUC_num), "}"), sprintf("%.4f", AUC_num)),
-    Mean_Selected = ifelse(Best_Method, paste0("\\textbf{", Mean_Selected_num, "}"), as.character(Mean_Selected_num))
+    C_index = ifelse(Best_C_index, paste0("\\textbf{", sprintf("%.4f", C_index_num), "}"), sprintf("%.4f", C_index_num)),
+    Brier_Score = ifelse(Best_Brier, paste0("\\textbf{", sprintf("%.4f", Brier_Score_num), "}"), sprintf("%.4f", Brier_Score_num)),
+    Mean_Time_Dependent_AUC = ifelse(Best_AUC, paste0("\\textbf{", sprintf("%.4f", AUC_num), "}"), sprintf("%.4f", AUC_num)),
+    Mean_Selected = as.character(Mean_Selected_num)
   )
 
 latex_lines <- c(
@@ -909,7 +1143,7 @@ latex_lines <- c(
   "\\resizebox{\\textwidth}{!}{",
   "\\begin{tabular}{|l|l|c|c|c|c|}",
   "\\hline",
-  "Dataset & Method & C-index & Brier Score & Mean Time-Dependent AUC & Mean Selected \\\\",
+  "Dataset & Method & C-index & Brier Score & Mean Time-Dependent AUC & No. Selected \\\\",
   "\\hline"
 )
 
